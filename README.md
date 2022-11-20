@@ -1,10 +1,12 @@
 # OCI container registry in Go
-This is a toy application implementing the [OCI image spec] &
-[OCI distribution spec] for the purposes of my own learning of Go and
-containers at a fundamental level.
+This is a simple application implementing the [OCI image spec] &
+[OCI distribution spec] for the purposes of education. This won't ever
+be a production-grade registry but the goal is to have it pass all the OCI
+distribution conformance tests as well as a playground to explore common
+idioms and patterns in Go.
 
-## TODO
-* Implement [distribution endpoints]
+## High level objectives
+* Implement the required [OCI distribution spec endpoints]
 * [Use the image-spec schema] & [validate image-spec]
 * Validate server using [distribution conformance tests]
 
