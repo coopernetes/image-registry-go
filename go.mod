@@ -1,4 +1,4 @@
-module github.com/coopernetes/github-event-listener
+module github.com/coopernetes/image-registry-go
 
 go 1.19
 

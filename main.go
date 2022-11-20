@@ -4,16 +4,19 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"log"
 	"net/http"
+	"os"
+	"path"
+	"regexp"
 	"strings"
-
-	specs "github.com/opencontainers/image-spec/specs-go/v1"
 )
 
 const (
 	// https://github.com/opencontainers/distribution-spec/blob/main/spec.md#pulling-manifests
-	imageRegex string = "[a-z0-9]+([._-][a-z0-9]+)*(/[a-z0-9]+([._-][a-z0-9]+)*)*"
+	nameRegex string = "[a-z0-9]+([._-][a-z0-9]+)*(/[a-z0-9]+([._-][a-z0-9]+)*)*"
+	refRegex  string = "[a-zA-Z0-9_][a-zA-Z0-9._-]{0,127}"
 )
 
 type ErrorResponse struct {
@@ -28,126 +31,114 @@ type ErrorDetail struct {
 
 func main() {
 	fmt.Println("Starting...")
-	http.HandleFunc("/v2/", v2Handler)
+	rootDir := setupStorage()
+	log.Printf("Storage: %s", rootDir)
+	http.HandleFunc("/v2/", func(w http.ResponseWriter, r *http.Request) {
+		printInfo(r)
+		name, err := parseName(r.RequestURI)
+		if err != nil {
+			es := fmt.Sprintf("Unexpected error encountered: %s", err.Error())
+			_, err := w.Write([]byte(es))
+			if err != nil {
+				log.Printf("ERROR! Could not write error in request?! %s", err.Error())
+			}
+			w.WriteHeader(500)
+		}
+		if !validName(name) {
+			w.Write(writeError("NAME_INVALID", "invalid repository name"))
+			w.WriteHeader(400)
+		}
+		log.Printf(name)
+		endpoint := strings.TrimPrefix(r.RequestURI, strings.Join([]string{"/v2/", name}, ""))
+		if strings.Contains(endpoint, "/blobs/uploads/") {
+			handleUpload(name, r, rootDir)
+		}
+		w.WriteHeader(200)
+	})
 	log.Fatal(http.ListenAndServe(":8080", nil))
 }
 
-func parseImage(url string) (string, string, error) {
-	if !strings.HasPrefix(url, "/v2/") {
-		return "", "", errors.New("Not a valid url")
+func setupStorage() string {
+	dir, wdErr := os.Getwd()
+	if wdErr != nil {
+		log.Fatalf(wdErr.Error())
 	}
-	trimmed := strings.TrimPrefix(url, "/v2/")
-	parts := strings.Split(trimmed, "/manifests/")
-	return parts[0], parts[1], nil
-}
-
-func v2Handler(w http.ResponseWriter, r *http.Request) {
-	log.Printf("URL: %s", r.RequestURI)
-	log.Printf("Content-Type: %s", r.Header.Get("Content-Type"))
-	log.Printf("Accept: %s", r.Header.Get("Accept"))
-	if r.RequestURI == "/v2/" {
-		w.WriteHeader(200)
-	}
-	h_accept := r.Header.Get("Accept")
-	switch h_accept {
-	case specs.MediaTypeImageIndex:
-		log.Print("OCI index media type hit")
-		w.Header().Set("Content-Type", h_accept)
-	case "application/vnd.docker.distribution.manifest.v1+prettyjws":
-		log.Print("Docker v1+prettyjws media type hit")
-		w.Header().Set("Content-Type", h_accept)
-	case "application/vnd.docker.distribution.manifest.v2+json":
-		log.Print("Docker v2+json media type hit")
-		w.Header().Set("Content-Type", h_accept)
-	case "application/json":
-		log.Print("JSON media type hit")
-		w.Header().Set("Content-Type", h_accept)
-	default:
-		log.Printf("Unexpected or empty Accept header: %s", h_accept)
-	}
-	if r.Method == "HEAD" && strings.Contains(r.RequestURI, "/manifests/") {
-		existHandler(w, r)
-	}
-	if r.Method == "GET" && strings.Contains(r.RequestURI, "/manifests/") {
-		pullHandler(w, r)
-	}
-}
-
-func existHandler(w http.ResponseWriter, r *http.Request) {
-	log.Printf("Hit exist handler, uri: %s", r.RequestURI)
-	m := make(map[string][]string)
-	m["test/image"] = []string{"latest"}
-	m["anotherimage"] = []string{"latest", "v0.0.1", "v0.0.2"}
-	req_i, req_ref, err := parseImage(r.RequestURI)
-	if err != nil {
-		log.Fatal(err)
-	}
-	log.Printf("%s:%s", req_i, req_ref)
-	for image, refs := range m {
-		for _, ref := range refs {
-			if r.RequestURI == fmt.Sprintf("/v2/%s/manifests/%v", image, ref) {
-				log.Printf("Matched image %s:%s", image, ref)
-				w.WriteHeader(200)
+	dir = path.Join(dir, "images")
+	_, readErr := os.ReadDir(dir)
+	if readErr != nil {
+		if errors.Is(readErr, fs.ErrNotExist) {
+			mkErr := os.MkdirAll("images", 0755)
+			if mkErr != nil {
+				log.Fatalf(mkErr.Error())
 			}
 		}
-	}
-	log.Printf("No matching manifests found for %s", r.RequestURI)
-	errorHandler(w, r, ErrorDetail{
-		Code:    "BLOB_UNKNOWN",
-		Message: fmt.Sprintf("Image %s:%s not found", req_i, req_ref),
-		Detail:  fmt.Sprintf("uri=%s", r.RequestURI),
-	}, 404)
-}
-
-func pullHandler(w http.ResponseWriter, r *http.Request) {
-	log.Printf("Hit pull handler, uri: %s", r.RequestURI)
-	m := make(map[string][]string)
-	m["test/image"] = []string{"latest"}
-	m["anotherimage"] = []string{"latest", "v0.0.1", "v0.0.2"}
-	req_i, req_ref, err := parseImage(r.RequestURI)
-	if err != nil {
-		log.Fatal(err)
-	}
-	for image, refs := range m {
-		for _, ref := range refs {
-			if r.RequestURI == fmt.Sprintf("/v2/%s/manifests/%v", image, ref) {
-				log.Printf("Matched image %s:%s", image, ref)
-				w.WriteHeader(200)
-				return
-			}
+		if !errors.Is(readErr, fs.ErrExist) {
+			log.Fatalf(readErr.Error())
 		}
 	}
-	log.Printf("No matching manifests found for %s", r.RequestURI)
-	errorHandler(w, r, ErrorDetail{
-		Code:    "BLOB_UNKNOWN",
-		Message: fmt.Sprintf("Image %s:%s not found", req_i, req_ref),
-		Detail:  fmt.Sprintf("uri=%s", r.RequestURI),
-	}, 404)
+	return dir
 }
 
-func pushHandler(w http.ResponseWriter, r *http.Request) {
-	log.Printf("Hit %s", r.RequestURI)
-	rc, err := r.GetBody()
-	if err != nil {
-		fmt.Fprintf(w, "Something went wrong!")
-	}
-	data := make([]byte, r.ContentLength)
-	rc.Read(data)
-	var idx specs.Index
-	json.Unmarshal(data, &idx)
-	log.Print(idx)
+func printInfo(r *http.Request) {
+	client := r.Host
+	method := r.Method
+	uri := r.RequestURI
+	conType := r.Header.Get("Content-Type")
+
+	log.Printf("Request details:")
+	log.Printf("\tHost: %s", client)
+	log.Printf("\tMethod: %s", method)
+	log.Printf("\tURI: %s", uri)
+	log.Printf("\tHost: %s", conType)
 }
 
-func errorHandler(w http.ResponseWriter, r *http.Request, errDetail ErrorDetail, statusCode int) {
-	resp := ErrorResponse{
-		Errors: []ErrorDetail{errDetail},
+func writeError(code string, message string) []byte {
+	e := ErrorResponse{
+		Errors: []ErrorDetail{
+			ErrorDetail{
+				Code:    code,
+				Message: message,
+				Detail:  "{}",
+			},
+		},
 	}
-	log.Print(resp)
-	d, err := json.Marshal(resp)
+	out, err := json.Marshal(e)
 	if err != nil {
-		log.Fatal(err)
+		log.Printf("Unable to marshall error response: %s", err.Error())
 	}
-	log.Printf("%s", string(d[:]))
-	w.WriteHeader(statusCode)
-	w.Write(d)
+	return out
+}
+
+func parseName(url string) (string, error) {
+	s := strings.TrimPrefix(url, "/v2/")
+	paths := strings.Count(s, "/")
+	var name = ""
+	if paths <= 1 {
+		return "", errors.New(fmt.Sprintf("URL does not match any valid OCI endpoint: %s", url))
+	}
+	if paths == 2 {
+		name = strings.Split(s, "/")[0]
+	} else {
+		parts := make([]string, 0)
+		for _, p := range strings.Split(s, "/") {
+			if p == "blobs" || p == "manifests" || p == "tags" || p == "referrers" {
+				break
+			}
+			parts = append(parts, p)
+		}
+		name = strings.Join(parts, "/")
+	}
+	return name, nil
+}
+
+func validName(name string) bool {
+	matched, err := regexp.MatchString(nameRegex, name)
+	if err != nil {
+		log.Printf("Error while parsing regex: %s", err.Error())
+	}
+	return matched
+}
+
+func handleUpload(name string, r *http.Request, rootDir string) error {
+	return nil
 }
