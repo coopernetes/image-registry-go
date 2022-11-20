@@ -20,8 +20,9 @@ import (
 
 const (
 	// https://github.com/opencontainers/distribution-spec/blob/main/spec.md#pulling-manifests
-	nameRegex string = "[a-z0-9]+([._-][a-z0-9]+)*(/[a-z0-9]+([._-][a-z0-9]+)*)*"
-	refRegex  string = "[a-zA-Z0-9_][a-zA-Z0-9._-]{0,127}"
+	nameRegex   string = "^[a-z0-9]+([._-][a-z0-9]+)*(/[a-z0-9]+([._-][a-z0-9]+)*)*$"
+	refRegex    string = "^[a-zA-Z0-9_][a-zA-Z0-9._-]{1,127}$"
+	digestRegex string = "^sha256:([a-f0-9]{64})$"
 )
 
 type ErrorResponse struct {
@@ -45,19 +46,19 @@ func main() {
 		if err != nil {
 			writeServerError(err, w)
 		}
-		if !validName(name) {
-			w.WriteHeader(400)
-			_, err := w.Write(writeError("NAME_INVALID", "invalid repository name"))
-			if err != nil {
-				writeServerError(err, w)
-			}
+		if !matches(nameRegex, name) {
+			writeOciError("NAME_INVALID", "invalid repository name", w, 400)
+			return
 		}
-		log.Printf(name)
 		endpoint := strings.TrimPrefix(r.RequestURI, strings.Join([]string{"/v2/", name}, ""))
 		if r.Method == "HEAD" && strings.Contains(endpoint, "/blobs/sha256:") {
 			parts := strings.Split(endpoint, "/")
 			requestDigest := parts[len(parts)-1]
-			b, err := blobExists(rootDir, name, requestDigest)
+			if !matches(digestRegex, requestDigest) {
+				writeOciError("BLOB_UNKNOWN", "blob unknown to registry", w, 400)
+				return
+			}
+			b, err := fileExists(path.Join(rootDir, name, "_blobs", requestDigest))
 			var status int
 			if err != nil {
 				writeServerError(err, w)
@@ -73,7 +74,8 @@ func main() {
 		if r.Method == "GET" && strings.Contains(endpoint, "/blobs/sha256:") {
 			parts := strings.Split(endpoint, "/")
 			requestDigest := parts[len(parts)-1]
-			b, err := blobExists(rootDir, name, requestDigest)
+			blobPath := path.Join(rootDir, name, "_blobs", requestDigest)
+			b, err := fileExists(blobPath)
 			var status int
 			if err != nil {
 				writeServerError(err, w)
@@ -81,7 +83,7 @@ func main() {
 			if b {
 				w.Header().Set("Docker-Content-Digest", requestDigest)
 				status = 200
-				content, e := readBlob(rootDir, name, requestDigest)
+				content, e := readFile(blobPath)
 				if e != nil {
 					writeServerError(e, w)
 				}
@@ -100,32 +102,75 @@ func main() {
 			w.WriteHeader(202)
 		}
 		if r.Method == "PUT" && strings.Contains(endpoint, "/blobs/uploads/") {
-			err := os.MkdirAll(path.Join(rootDir, name, "_uploads"), 0755)
+			err := os.MkdirAll(path.Join(rootDir, name, "_blobs"), 0755)
 			if err != nil {
 				writeServerError(err, w)
 			}
 			digest := r.FormValue("digest")
 			log.Printf("Digest: %s", digest)
-			destFile := path.Join(rootDir, name, "_uploads", digest)
-			var f *os.File
-			if _, statE := os.Stat(destFile); os.IsNotExist(statE) {
-				innerF, err := os.OpenFile(destFile, os.O_RDWR|os.O_CREATE, 0644)
-				if err != nil {
-					writeServerError(err, w)
-				}
-				f = innerF
-			} else {
-				innerF, err := os.OpenFile(destFile, os.O_RDWR|os.O_CREATE, 0644)
-				if err != nil {
-					writeServerError(err, w)
-				}
-				err = os.Truncate(destFile, 0)
-				if err != nil {
-					writeServerError(err, w)
-				}
-				f = innerF
+			destFile := path.Join(rootDir, name, "_blobs", digest)
+			writeToFile(destFile, w, r)
+		}
+		if r.Method == "PUT" && strings.Contains(endpoint, "/manifests/") {
+			parts := strings.Split(endpoint, "/manifests/")
+			requestRef := parts[len(parts)-1]
+			if !matches(refRegex, requestRef) {
+				writeOciError("MANIFEST_INVALID", "manifest invalid", w, 400)
+				return
 			}
-			writeToFile(f, w, r)
+			err := os.MkdirAll(path.Join(rootDir, name, requestRef), 0755)
+			if err != nil {
+				writeServerError(err, w)
+			}
+			destFile := path.Join(rootDir, name, requestRef, "manifest.json")
+			writeToFile(destFile, w, r)
+		}
+		if r.Method == "HEAD" && strings.Contains(endpoint, "/manifests/") {
+			parts := strings.Split(endpoint, "/")
+			requestRef := parts[len(parts)-1]
+			if !matches(refRegex, requestRef) {
+				http.Error(w, "", 404)
+				//writeOciError("MANIFEST_INVALID", "manifest invalid", w, 404)
+				return
+			}
+			manifestPath := path.Join(rootDir, name, requestRef, "manifest.json")
+			b, err := fileExists(manifestPath)
+			var status int
+			if err != nil {
+				writeServerError(err, w)
+			}
+			if b {
+				status = 200
+			} else {
+				status = 404
+			}
+			w.WriteHeader(status)
+		}
+		if r.Method == "GET" && strings.Contains(endpoint, "/manifests/") {
+			parts := strings.Split(endpoint, "/")
+			requestRef := parts[len(parts)-1]
+			if !matches(refRegex, requestRef) {
+				writeOciError("MANIFEST_INVALID", "manifest invalid", w, 400)
+				return
+			}
+			manifestPath := path.Join(rootDir, name, requestRef, "manifest.json")
+			b, err := fileExists(manifestPath)
+			if err != nil {
+				writeServerError(err, w)
+			}
+			if b {
+				content, e := readFile(manifestPath)
+				if e != nil {
+					writeServerError(e, w)
+				}
+				_, err := content.WriteTo(w)
+				if err != nil {
+					writeServerError(err, w)
+				}
+			} else {
+				writeOciError("MANIFEST_UNKNOWN", "manifest unknown to registry", w, 404)
+				return
+			}
 		}
 	})
 	log.Fatal(http.ListenAndServe(":8080", nil))
@@ -134,13 +179,28 @@ func main() {
 func writeServerError(err error, w http.ResponseWriter) {
 	w.WriteHeader(500)
 	es := fmt.Sprintf("Unexpected error encountered: %s", err.Error())
-	_, writeErr := w.Write([]byte(es))
-	if writeErr != nil {
-		log.Panicf("ERROR! Could not write error in request?! %s", err.Error())
-	}
+	http.Error(w, es, 500)
 }
 
-func writeToFile(f *os.File, w http.ResponseWriter, r *http.Request) {
+func writeToFile(destFile string, w http.ResponseWriter, r *http.Request) {
+	var f *os.File
+	if _, statE := os.Stat(destFile); os.IsNotExist(statE) {
+		innerF, err := os.OpenFile(destFile, os.O_RDWR|os.O_CREATE, 0644)
+		if err != nil {
+			writeServerError(err, w)
+		}
+		f = innerF
+	} else {
+		innerF, err := os.OpenFile(destFile, os.O_RDWR|os.O_CREATE, 0644)
+		if err != nil {
+			writeServerError(err, w)
+		}
+		err = os.Truncate(destFile, 0)
+		if err != nil {
+			writeServerError(err, w)
+		}
+		f = innerF
+	}
 	total := r.ContentLength
 	buf := make([]byte, 1024)
 	for {
@@ -162,9 +222,9 @@ func writeToFile(f *os.File, w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(201)
 }
 
-func readBlob(rootDir string, name string, digest string) (bytes.Buffer, error) {
+func readFile(path string) (bytes.Buffer, error) {
 	var b bytes.Buffer
-	f, err := os.Open(path.Join(rootDir, name, "_uploads", digest))
+	f, err := os.Open(path)
 	if err != nil {
 		return b, err
 	}
@@ -208,7 +268,7 @@ func printInfo(r *http.Request) {
 	log.Printf("\tHost: %s", conType)
 }
 
-func writeError(code string, message string) []byte {
+func writeOciError(code string, message string, w http.ResponseWriter, statusCode int) {
 	e := ErrorResponse{
 		Errors: []ErrorDetail{{
 			Code:    code,
@@ -219,8 +279,9 @@ func writeError(code string, message string) []byte {
 	out, err := json.Marshal(e)
 	if err != nil {
 		log.Printf("Unable to marshall error response: %s", err.Error())
+		http.Error(w, err.Error(), 500)
 	}
-	return out
+	http.Error(w, string(out[:]), statusCode)
 }
 
 func parseName(url string) (string, error) {
@@ -245,23 +306,22 @@ func parseName(url string) (string, error) {
 	return name, nil
 }
 
-func validName(name string) bool {
-	matched, err := regexp.MatchString(nameRegex, name)
+func matches(pattern string, name string) bool {
+	matched, err := regexp.MatchString(pattern, name)
 	if err != nil {
 		log.Printf("Error while parsing regex: %s", err.Error())
 	}
 	return matched
 }
 
-func blobExists(rootDir string, name string, digest string) (bool, error) {
-	entries, err := os.ReadDir(path.Join(rootDir, name, "_uploads"))
+func fileExists(path string) (bool, error) {
+	_, err := os.Open(path)
 	if err != nil {
-		return false, errors.New(fmt.Sprintf("No blobs found for %s: %s", name, err))
-	}
-	for _, de := range entries {
-		if !de.IsDir() && de.Name() == digest {
-			return true, nil
+		if errors.Is(err, os.ErrNotExist) {
+			return false, nil
+		} else {
+			return false, errors.New(fmt.Sprintf("Unexpected error while checking existence of %s: %s", path, err))
 		}
 	}
-	return false, nil
+	return true, nil
 }

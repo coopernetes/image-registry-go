@@ -45,3 +45,10 @@ func TestParseNameManifests(t *testing.T) {
 		t.Errorf("want %s, got %s", expected, withDigest)
 	}
 }
+
+func TestMatchInvalidRef(t *testing.T) {
+	m := matches(refRegex, "sha256:totallywrong")
+	if m {
+		t.Errorf("Wanted false, got true: %s != %s", refRegex, "sha256:totallywrong")
+	}
+}
