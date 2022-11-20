@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -53,6 +54,46 @@ func main() {
 		}
 		log.Printf(name)
 		endpoint := strings.TrimPrefix(r.RequestURI, strings.Join([]string{"/v2/", name}, ""))
+		if r.Method == "HEAD" && strings.Contains(endpoint, "/blobs/sha256:") {
+			parts := strings.Split(endpoint, "/")
+			requestDigest := parts[len(parts)-1]
+			b, err := blobExists(rootDir, name, requestDigest)
+			var status int
+			if err != nil {
+				writeServerError(err, w)
+			}
+			if b {
+				w.Header().Set("Docker-Content-Digest", requestDigest)
+				status = 200
+			} else {
+				status = 404
+			}
+			w.WriteHeader(status)
+		}
+		if r.Method == "GET" && strings.Contains(endpoint, "/blobs/sha256:") {
+			parts := strings.Split(endpoint, "/")
+			requestDigest := parts[len(parts)-1]
+			b, err := blobExists(rootDir, name, requestDigest)
+			var status int
+			if err != nil {
+				writeServerError(err, w)
+			}
+			if b {
+				w.Header().Set("Docker-Content-Digest", requestDigest)
+				status = 200
+				content, e := readBlob(rootDir, name, requestDigest)
+				if e != nil {
+					writeServerError(e, w)
+				}
+				_, err := content.WriteTo(w)
+				if err != nil {
+					writeServerError(err, w)
+				}
+			} else {
+				status = 404
+				w.WriteHeader(status)
+			}
+		}
 		if r.Method == "POST" && strings.HasSuffix(endpoint, "/blobs/uploads/") {
 			id := uuid.Generate().String()
 			w.Header().Set("Location", r.RequestURI+id)
@@ -101,22 +142,17 @@ func writeServerError(err error, w http.ResponseWriter) {
 
 func writeToFile(f *os.File, w http.ResponseWriter, r *http.Request) {
 	total := r.ContentLength
-	log.Printf("Total %d", total)
 	buf := make([]byte, 1024)
 	for {
 		n, err := r.Body.Read(buf)
-		log.Printf("Read %d", n)
 		_, err2 := f.Write(buf[0:n])
 		if err2 != nil {
 			log.Printf("Failed to write buffer to file: %s", err2)
 		}
-		log.Printf("Wrote %d", n)
 		if err == io.EOF {
-			log.Print("Reached EOF")
 			break
 		}
 		total = total - int64(n)
-		log.Printf("Total to read %d", total)
 		if total > 0 {
 			for i := 0; i < 1024; i++ {
 				buf[i] = 0
@@ -124,6 +160,19 @@ func writeToFile(f *os.File, w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	w.WriteHeader(201)
+}
+
+func readBlob(rootDir string, name string, digest string) (bytes.Buffer, error) {
+	var b bytes.Buffer
+	f, err := os.Open(path.Join(rootDir, name, "_uploads", digest))
+	if err != nil {
+		return b, err
+	}
+	_, readE := b.ReadFrom(f)
+	if readE != nil {
+		return bytes.Buffer{}, readE
+	}
+	return b, nil
 }
 
 func setupStorage() string {
@@ -204,7 +253,15 @@ func validName(name string) bool {
 	return matched
 }
 
-func createSessionId(name string, r *http.Request) error {
-
-	return nil
+func blobExists(rootDir string, name string, digest string) (bool, error) {
+	entries, err := os.ReadDir(path.Join(rootDir, name, "_uploads"))
+	if err != nil {
+		return false, errors.New(fmt.Sprintf("No blobs found for %s: %s", name, err))
+	}
+	for _, de := range entries {
+		if !de.IsDir() && de.Name() == digest {
+			return true, nil
+		}
+	}
+	return false, nil
 }
