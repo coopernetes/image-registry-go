@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"log"
 	"net/http"
@@ -11,6 +12,9 @@ import (
 	"path"
 	"regexp"
 	"strings"
+
+	"github.com/distribution/distribution/uuid"
+	_ "github.com/opencontainers/image-spec/specs-go/v1"
 )
 
 const (
@@ -31,49 +35,112 @@ type ErrorDetail struct {
 
 func main() {
 	fmt.Println("Starting...")
+	log.SetFlags(log.LstdFlags | log.Lshortfile)
 	rootDir := setupStorage()
 	log.Printf("Storage: %s", rootDir)
 	http.HandleFunc("/v2/", func(w http.ResponseWriter, r *http.Request) {
 		printInfo(r)
 		name, err := parseName(r.RequestURI)
 		if err != nil {
-			es := fmt.Sprintf("Unexpected error encountered: %s", err.Error())
-			_, err := w.Write([]byte(es))
-			if err != nil {
-				log.Printf("ERROR! Could not write error in request?! %s", err.Error())
-			}
-			w.WriteHeader(500)
+			writeServerError(err, w)
 		}
 		if !validName(name) {
-			w.Write(writeError("NAME_INVALID", "invalid repository name"))
 			w.WriteHeader(400)
+			_, err := w.Write(writeError("NAME_INVALID", "invalid repository name"))
+			if err != nil {
+				writeServerError(err, w)
+			}
 		}
 		log.Printf(name)
 		endpoint := strings.TrimPrefix(r.RequestURI, strings.Join([]string{"/v2/", name}, ""))
-		if strings.Contains(endpoint, "/blobs/uploads/") {
-			handleUpload(name, r, rootDir)
+		if r.Method == "POST" && strings.HasSuffix(endpoint, "/blobs/uploads/") {
+			id := uuid.Generate().String()
+			w.Header().Set("Location", r.RequestURI+id)
+			w.WriteHeader(202)
 		}
-		w.WriteHeader(200)
+		if r.Method == "PUT" && strings.Contains(endpoint, "/blobs/uploads/") {
+			err := os.MkdirAll(path.Join(rootDir, name, "_uploads"), 0755)
+			if err != nil {
+				writeServerError(err, w)
+			}
+			digest := r.FormValue("digest")
+			log.Printf("Digest: %s", digest)
+			destFile := path.Join(rootDir, name, "_uploads", digest)
+			var f *os.File
+			if _, statE := os.Stat(destFile); os.IsNotExist(statE) {
+				innerF, err := os.OpenFile(destFile, os.O_RDWR|os.O_CREATE, 0644)
+				if err != nil {
+					writeServerError(err, w)
+				}
+				f = innerF
+			} else {
+				innerF, err := os.OpenFile(destFile, os.O_RDWR|os.O_CREATE, 0644)
+				if err != nil {
+					writeServerError(err, w)
+				}
+				err = os.Truncate(destFile, 0)
+				if err != nil {
+					writeServerError(err, w)
+				}
+				f = innerF
+			}
+			writeToFile(f, w, r)
+		}
 	})
 	log.Fatal(http.ListenAndServe(":8080", nil))
+}
+
+func writeServerError(err error, w http.ResponseWriter) {
+	w.WriteHeader(500)
+	es := fmt.Sprintf("Unexpected error encountered: %s", err.Error())
+	_, writeErr := w.Write([]byte(es))
+	if writeErr != nil {
+		log.Panicf("ERROR! Could not write error in request?! %s", err.Error())
+	}
+}
+
+func writeToFile(f *os.File, w http.ResponseWriter, r *http.Request) {
+	total := r.ContentLength
+	log.Printf("Total %d", total)
+	buf := make([]byte, 1024)
+	for {
+		n, err := r.Body.Read(buf)
+		log.Printf("Read %d", n)
+		_, err2 := f.Write(buf[0:n])
+		if err2 != nil {
+			log.Printf("Failed to write buffer to file: %s", err2)
+		}
+		log.Printf("Wrote %d", n)
+		if err == io.EOF {
+			log.Print("Reached EOF")
+			break
+		}
+		total = total - int64(n)
+		log.Printf("Total to read %d", total)
+		if total > 0 {
+			for i := 0; i < 1024; i++ {
+				buf[i] = 0
+			}
+		}
+	}
+	w.WriteHeader(201)
 }
 
 func setupStorage() string {
 	dir, wdErr := os.Getwd()
 	if wdErr != nil {
-		log.Fatalf(wdErr.Error())
+		log.Printf(wdErr.Error())
 	}
-	dir = path.Join(dir, "images")
+	dir = path.Join(dir, "data")
 	_, readErr := os.ReadDir(dir)
 	if readErr != nil {
 		if errors.Is(readErr, fs.ErrNotExist) {
-			mkErr := os.MkdirAll("images", 0755)
+			mkErr := os.MkdirAll(dir, 0755)
 			if mkErr != nil {
-				log.Fatalf(mkErr.Error())
+				log.Printf(mkErr.Error())
 			}
-		}
-		if !errors.Is(readErr, fs.ErrExist) {
-			log.Fatalf(readErr.Error())
+		} else {
+			log.Printf(readErr.Error())
 		}
 	}
 	return dir
@@ -94,13 +161,11 @@ func printInfo(r *http.Request) {
 
 func writeError(code string, message string) []byte {
 	e := ErrorResponse{
-		Errors: []ErrorDetail{
-			ErrorDetail{
-				Code:    code,
-				Message: message,
-				Detail:  "{}",
-			},
-		},
+		Errors: []ErrorDetail{{
+			Code:    code,
+			Message: message,
+			Detail:  "{}",
+		}},
 	}
 	out, err := json.Marshal(e)
 	if err != nil {
@@ -139,6 +204,7 @@ func validName(name string) bool {
 	return matched
 }
 
-func handleUpload(name string, r *http.Request, rootDir string) error {
+func createSessionId(name string, r *http.Request) error {
+
 	return nil
 }
