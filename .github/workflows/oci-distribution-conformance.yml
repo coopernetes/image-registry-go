@@ -20,7 +20,7 @@ jobs:
           tags: coopernetes/registry:latest
       - name: Run registry container
         run: |
-            docker run --name registry -it -p 8080:8080 coopernetes/registry:latest &> run.log &
+            docker run --name registry -p 8080:8080 coopernetes/registry:latest &> run.log &
       - name: Run OCI Distribution Spec conformance tests
         uses: opencontainers/distribution-spec@main
         env:
