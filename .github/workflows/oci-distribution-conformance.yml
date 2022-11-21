@@ -36,7 +36,8 @@ jobs:
           OCI_DEBUG: 0
           OCI_DELETE_MANIFEST_BEFORE_BLOBS: 0
       - name: Stop container
-        run: docker stop registry
+        run: |
+          docker stop registry
       - run: mkdir -p .out/ && mv {report.html,junit.xml} .out/ && mv run.log .out/run.log
         if: always()
       - name: Upload test results zip as build artifact
