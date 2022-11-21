@@ -36,6 +36,11 @@ type ErrorDetail struct {
 	Detail  string `json:"detail"`
 }
 
+type TagList struct {
+	Name    string   `json:"name"`
+	TagList []string `json:"tags"`
+}
+
 func main() {
 	fmt.Println("Starting...")
 	logFlags := log.LstdFlags | log.LUTC
@@ -117,6 +122,31 @@ func main() {
 			log.Printf("Digest: %s", digest)
 			destFile := path.Join(rootDir, name, "_blobs", digest)
 			writeToFile(destFile, w, r)
+		}
+		if r.Method == "GET" && strings.HasSuffix(endpoint, "/tags/list") {
+			if _, err := os.ReadDir(path.Join(rootDir, name)); err != nil {
+				writeOciError("NAME_UNKNOWN", "repository name not known to registry", w, 404)
+				return
+			}
+			tags, err := getTags(path.Join(rootDir, name))
+			if err != nil {
+				writeServerError(err, w)
+				return
+			}
+			tl := TagList{
+				Name:    name,
+				TagList: tags,
+			}
+			jb, jE := json.Marshal(tl)
+			if jE != nil {
+				writeServerError(jE, w)
+				return
+			}
+			_, wE := w.Write(jb)
+			if wE != nil {
+				writeServerError(wE, w)
+				return
+			}
 		}
 		if r.Method == "PUT" && strings.Contains(endpoint, "/manifests/") {
 			parts := strings.Split(endpoint, "/manifests/")
@@ -213,6 +243,21 @@ func main() {
 		}
 	})
 	log.Fatal(http.ListenAndServe(":8080", nil))
+}
+
+func getTags(path string) ([]string, error) {
+	tags := make([]string, 0)
+	files, err := os.ReadDir(path)
+	if err != nil {
+		return tags, err
+	}
+	for _, de := range files {
+		if de.Name() == "_blobs" {
+			continue
+		}
+		tags = append(tags, de.Name())
+	}
+	return tags, nil
 }
 
 func writeServerError(err error, w http.ResponseWriter) {
