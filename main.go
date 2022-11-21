@@ -57,6 +57,7 @@ func main() {
 		name, err := parseName(r.RequestURI)
 		if err != nil {
 			writeServerError(err, w)
+			return
 		}
 		if !matches(nameRegex, name) {
 			writeOciError("NAME_INVALID", "invalid repository name", w, 400)
@@ -74,6 +75,7 @@ func main() {
 			var status int
 			if err != nil {
 				writeServerError(err, w)
+				return
 			}
 			if b {
 				w.Header().Set("Docker-Content-Digest", requestDigest)
@@ -91,6 +93,7 @@ func main() {
 			var status int
 			if err != nil {
 				writeServerError(err, w)
+				return
 			}
 			if b {
 				w.Header().Set("Docker-Content-Digest", requestDigest)
@@ -98,10 +101,12 @@ func main() {
 				content, e := readFile(blobPath)
 				if e != nil {
 					writeServerError(e, w)
+					return
 				}
 				_, err := content.WriteTo(w)
 				if err != nil {
 					writeServerError(err, w)
+					return
 				}
 			} else {
 				status = 404
@@ -113,10 +118,11 @@ func main() {
 			w.Header().Set("Location", r.RequestURI+id)
 			w.WriteHeader(202)
 		}
-		if r.Method == "PUT" && strings.Contains(endpoint, "/blobs/uploads/") {
+		if r.Method == "PUT" && strings.Contains(endpoint, "/blobs/uploads/?") {
 			err := os.MkdirAll(path.Join(rootDir, name, "_blobs"), 0755)
 			if err != nil {
 				writeServerError(err, w)
+				return
 			}
 			digest := r.FormValue("digest")
 			log.Printf("Digest: %s", digest)
@@ -158,6 +164,7 @@ func main() {
 			err := os.MkdirAll(path.Join(rootDir, name, requestRef), 0755)
 			if err != nil {
 				writeServerError(err, w)
+				return
 			}
 			destFile := path.Join(rootDir, name, requestRef, "manifest.json")
 			writeToFile(destFile, w, r)
@@ -191,6 +198,7 @@ func main() {
 			var status int
 			if err != nil {
 				writeServerError(err, w)
+				return
 			}
 			if b {
 				status = 200
@@ -226,15 +234,18 @@ func main() {
 			b, err := fileExists(manifestPath)
 			if err != nil {
 				writeServerError(err, w)
+				return
 			}
 			if b {
 				content, e := readFile(manifestPath)
 				if e != nil {
 					writeServerError(e, w)
+					return
 				}
 				_, err := content.WriteTo(w)
 				if err != nil {
 					writeServerError(err, w)
+					return
 				}
 			} else {
 				writeOciError("MANIFEST_UNKNOWN", "manifest unknown to registry", w, 404)
@@ -261,7 +272,6 @@ func getTags(path string) ([]string, error) {
 }
 
 func writeServerError(err error, w http.ResponseWriter) {
-	w.WriteHeader(500)
 	es := fmt.Sprintf("Unexpected error encountered: %s", err.Error())
 	http.Error(w, es, 500)
 }
@@ -272,16 +282,19 @@ func writeToFile(destFile string, w http.ResponseWriter, r *http.Request) {
 		innerF, err := os.OpenFile(destFile, os.O_RDWR|os.O_CREATE, 0644)
 		if err != nil {
 			writeServerError(err, w)
+			return
 		}
 		f = innerF
 	} else {
 		innerF, err := os.OpenFile(destFile, os.O_RDWR|os.O_CREATE, 0644)
 		if err != nil {
 			writeServerError(err, w)
+			return
 		}
 		err = os.Truncate(destFile, 0)
 		if err != nil {
 			writeServerError(err, w)
+			return
 		}
 		f = innerF
 	}
@@ -344,12 +357,18 @@ func printInfo(r *http.Request) {
 	method := r.Method
 	uri := r.RequestURI
 	conType := r.Header.Get("Content-Type")
+	accept := r.Header.Get("Accept")
 
 	log.Printf("Request details:")
 	log.Printf("\tHost: %s", client)
 	log.Printf("\tMethod: %s", method)
 	log.Printf("\tURI: %s", uri)
-	log.Printf("\tHost: %s", conType)
+	if conType != "" {
+		log.Printf("\tContent-Type: %s", conType)
+	}
+	if accept != "" {
+		log.Printf("\tAccept: %s", accept)
+	}
 }
 
 func writeOciError(code string, message string, w http.ResponseWriter, statusCode int) {
