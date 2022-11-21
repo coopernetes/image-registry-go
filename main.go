@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -37,11 +38,17 @@ type ErrorDetail struct {
 
 func main() {
 	fmt.Println("Starting...")
-	log.SetFlags(log.LstdFlags | log.Lshortfile)
+	logFlags := log.LstdFlags | log.LUTC
+	if e := os.Getenv("DEBUG"); e != "" {
+		logFlags = logFlags | log.Lshortfile
+	}
+	log.SetFlags(logFlags)
 	rootDir := setupStorage()
 	log.Printf("Storage: %s", rootDir)
 	http.HandleFunc("/v2/", func(w http.ResponseWriter, r *http.Request) {
-		printInfo(r)
+		if e := os.Getenv("DEBUG"); e != "" {
+			printInfo(r)
+		}
 		name, err := parseName(r.RequestURI)
 		if err != nil {
 			writeServerError(err, w)
@@ -127,13 +134,29 @@ func main() {
 		}
 		if r.Method == "HEAD" && strings.Contains(endpoint, "/manifests/") {
 			parts := strings.Split(endpoint, "/")
-			requestRef := parts[len(parts)-1]
-			if !matches(refRegex, requestRef) {
-				http.Error(w, "", 404)
-				//writeOciError("MANIFEST_INVALID", "manifest invalid", w, 404)
+			lastPart := parts[len(parts)-1]
+			isRef := matches(refRegex, lastPart)
+			isDigest := matches(digestRegex, lastPart)
+
+			if !(isRef || isDigest) {
+				writeOciError("MANIFEST_INVALID", "manifest invalid", w, 404)
 				return
 			}
-			manifestPath := path.Join(rootDir, name, requestRef, "manifest.json")
+			manifestPath := path.Join(rootDir, name)
+			if isRef {
+				manifestPath = path.Join(manifestPath, lastPart, "manifest.json")
+			} else {
+				foundPath, err := findManifest(rootDir, name, lastPart)
+				if err != nil {
+					return
+				}
+				if foundPath == "" {
+					writeOciError("MANIFEST_UNKNOWN", "manifest unknown to registry", w, 404)
+					return
+				}
+				manifestPath = foundPath
+			}
+			log.Printf("Manifest path: %s", manifestPath)
 			b, err := fileExists(manifestPath)
 			var status int
 			if err != nil {
@@ -148,12 +171,28 @@ func main() {
 		}
 		if r.Method == "GET" && strings.Contains(endpoint, "/manifests/") {
 			parts := strings.Split(endpoint, "/")
-			requestRef := parts[len(parts)-1]
-			if !matches(refRegex, requestRef) {
-				writeOciError("MANIFEST_INVALID", "manifest invalid", w, 400)
+			lastPart := parts[len(parts)-1]
+			isRef := matches(refRegex, lastPart)
+			isDigest := matches(digestRegex, lastPart)
+
+			if !(isRef || isDigest) {
+				writeOciError("MANIFEST_INVALID", "manifest invalid", w, 404)
 				return
 			}
-			manifestPath := path.Join(rootDir, name, requestRef, "manifest.json")
+			manifestPath := path.Join(rootDir, name)
+			if isRef {
+				manifestPath = path.Join(manifestPath, lastPart, "manifest.json")
+			} else {
+				foundPath, err := findManifest(rootDir, name, lastPart)
+				if err != nil {
+					return
+				}
+				if foundPath == "" {
+					writeOciError("MANIFEST_UNKNOWN", "manifest unknown to registry", w, 404)
+					return
+				}
+				manifestPath = foundPath
+			}
 			b, err := fileExists(manifestPath)
 			if err != nil {
 				writeServerError(err, w)
@@ -324,4 +363,34 @@ func fileExists(path string) (bool, error) {
 		}
 	}
 	return true, nil
+}
+
+func findManifest(rootDir string, name string, digest string) (string, error) {
+	files, err := os.ReadDir(path.Join(rootDir, name))
+	if err != nil {
+		return "", err
+	}
+	for _, de := range files {
+		if de.Name() == "_blobs" {
+			continue
+		}
+		if de.IsDir() {
+			manifestPath := path.Join(rootDir, name, de.Name(), "manifest.json")
+			f, fE := os.Open(manifestPath)
+			if fE != nil {
+				return "", fE
+			}
+			var buf bytes.Buffer
+			_, err := buf.ReadFrom(f)
+			if err != nil {
+				return "", err
+			}
+			h := sha256.Sum256(buf.Bytes())
+			thisDigest := fmt.Sprintf("sha256:%x", h)
+			if thisDigest == digest {
+				return manifestPath, nil
+			}
+		}
+	}
+	return "", nil
 }
