@@ -122,7 +122,7 @@ func main() {
 			w.Header().Set("Location", r.RequestURI+id)
 			w.WriteHeader(202)
 		}
-		if r.Method == "PUT" && strings.Contains(endpoint, "/blobs/uploads/?") {
+		if r.Method == "PUT" && strings.Contains(endpoint, "/blobs/uploads/") {
 			err := os.MkdirAll(path.Join(rootDir, name, "_blobs"), 0755)
 			if err != nil {
 				writeServerError(err, w)
