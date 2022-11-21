@@ -1,5 +1,5 @@
 name: oci-distribution-conformance
-on: [push, workflow_dispatch]
+on: push
 jobs:
   run:
     runs-on: ubuntu-latest

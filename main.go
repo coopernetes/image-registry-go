@@ -54,6 +54,10 @@ func main() {
 		if e := os.Getenv("DEBUG"); e != "" {
 			printInfo(r)
 		}
+		if r.Method == "GET" && r.RequestURI == "/v2/" {
+			w.WriteHeader(200)
+			return
+		}
 		name, err := parseName(r.RequestURI)
 		if err != nil {
 			writeServerError(err, w)
