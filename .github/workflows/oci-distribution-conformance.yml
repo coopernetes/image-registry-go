@@ -1,0 +1,47 @@
+name: oci-distribution-conformance
+on:
+  push:
+    branches: [ "main" ]
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v2
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v2
+      - name: Build and push
+        uses: docker/build-push-action@v3
+        with:
+          context: .
+          push: false
+          tags: coopernetes/registry:latest
+      - name: Run registry container
+        run: |
+            docker run --name registry -it -p 8080:8080 coopernetes/registry:latest &> run.log &
+      - name: Run OCI Distribution Spec conformance tests
+        uses: opencontainers/distribution-spec@main
+        env:
+          OCI_ROOT_URL: http://localhost:8080
+          OCI_NAMESPACE: mytestorg/mytestrepo
+          OCI_USERNAME: ${{ secrets.MY_REGISTRY_USERNAME }}
+          OCI_PASSWORD: ${{ secrets.MY_REGISTRY_PASSWORD }}
+          OCI_TEST_PULL: 1
+          OCI_TEST_PUSH: 0
+          OCI_TEST_CONTENT_DISCOVERY: 0
+          OCI_TEST_CONTENT_MANAGEMENT: 0
+          OCI_HIDE_SKIPPED_WORKFLOWS: 0
+          OCI_DEBUG: 0
+          OCI_DELETE_MANIFEST_BEFORE_BLOBS: 0
+      - name: Stop container
+        run: docker stop registry
+      - run: mkdir -p .out/ && mv {report.html,junit.xml} .out/ && mv run.log .out/run.log
+        if: always()
+      - name: Upload test results zip as build artifact
+        uses: actions/upload-artifact@v1
+        with:
+          name: oci-test-results-${{ github.sha }}
+          path: .out/
+        if: always()
