@@ -68,6 +68,9 @@ func main() {
 			return
 		}
 		endpoint := strings.TrimPrefix(r.RequestURI, strings.Join([]string{"/v2/", name}, ""))
+		if e := os.Getenv("DEBUG"); e != "" {
+			log.Printf("Endpoint: %s", endpoint)
+		}
 		if r.Method == "HEAD" && strings.Contains(endpoint, "/blobs/sha256:") {
 			parts := strings.Split(endpoint, "/")
 			requestDigest := parts[len(parts)-1]
@@ -122,6 +125,16 @@ func main() {
 			w.Header().Set("Location", r.RequestURI+id)
 			w.WriteHeader(202)
 		}
+		if r.Method == "POST" && strings.Contains(endpoint, "/blobs/uploads/") {
+			digest := r.FormValue("digest")
+			if digest == "" {
+				http.Error(w, "Digest missing", 400)
+				return
+			}
+			destFile := path.Join(rootDir, name, "_blobs", digest)
+			writeBodyToFileWithLocation(destFile, w, r, name, digest)
+			return
+		}
 		if r.Method == "PUT" && strings.Contains(endpoint, "/blobs/uploads/") {
 			err := os.MkdirAll(path.Join(rootDir, name, "_blobs"), 0755)
 			if err != nil {
@@ -131,7 +144,8 @@ func main() {
 			digest := r.FormValue("digest")
 			log.Printf("Digest: %s", digest)
 			destFile := path.Join(rootDir, name, "_blobs", digest)
-			writeToFile(destFile, w, r)
+			writeBodyToFile(destFile, w, r)
+			w.WriteHeader(201)
 		}
 		if r.Method == "GET" && strings.HasSuffix(endpoint, "/tags/list") {
 			if _, err := os.ReadDir(path.Join(rootDir, name)); err != nil {
@@ -171,7 +185,8 @@ func main() {
 				return
 			}
 			destFile := path.Join(rootDir, name, requestRef, "manifest.json")
-			writeToFile(destFile, w, r)
+			writeBodyToFile(destFile, w, r)
+			w.WriteHeader(201)
 		}
 		if r.Method == "HEAD" && strings.Contains(endpoint, "/manifests/") {
 			parts := strings.Split(endpoint, "/")
@@ -280,7 +295,16 @@ func writeServerError(err error, w http.ResponseWriter) {
 	http.Error(w, es, 500)
 }
 
-func writeToFile(destFile string, w http.ResponseWriter, r *http.Request) {
+func writeBodyToFileWithLocation(destFile string, w http.ResponseWriter, r *http.Request, name string, digest string) {
+	writeBodyToFile(destFile, w, r)
+	if !validateBlob(destFile, r.ContentLength, digest) {
+		http.Error(w, "blob did not match length or digest", 400)
+	}
+	w.Header().Set("Location", fmt.Sprintf("/v2/%s/blobs/%s", name, digest))
+	w.WriteHeader(201)
+}
+
+func writeBodyToFile(destFile string, w http.ResponseWriter, r *http.Request) {
 	var f *os.File
 	if _, statE := os.Stat(destFile); os.IsNotExist(statE) {
 		innerF, err := os.OpenFile(destFile, os.O_RDWR|os.O_CREATE, 0644)
@@ -320,7 +344,6 @@ func writeToFile(destFile string, w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	w.WriteHeader(201)
 }
 
 func readFile(path string) (bytes.Buffer, error) {
@@ -453,12 +476,25 @@ func findManifest(rootDir string, name string, digest string) (string, error) {
 			if err != nil {
 				return "", err
 			}
-			h := sha256.Sum256(buf.Bytes())
-			thisDigest := fmt.Sprintf("sha256:%x", h)
+			thisDigest := getDigest(buf.Bytes())
 			if thisDigest == digest {
 				return manifestPath, nil
 			}
 		}
 	}
 	return "", nil
+}
+
+func getDigest(b []byte) string {
+	h := sha256.Sum256(b)
+	return fmt.Sprintf("sha256:%x", h)
+}
+
+func validateBlob(filePath string, fileLen int64, digest string) bool {
+	b, e := readFile(filePath)
+	if e != nil {
+		log.Print(e)
+		return false
+	}
+	return getDigest(b.Bytes()) == digest
 }
